@@ -17,9 +17,9 @@ class Command(BaseCommand):
 
         for queue_name in queue_names:
             q = django_sqs.queues[queue_name].get_queue()
-            print 'Clearing queue %s...' % queue_name,
+            sys.stdout.write('Clearing queue %s...\n' % queue_name)
             sys.stdout.flush()
             n = q.clear()
-            print '%d deleted.' % n
+            sys.stdout.write('%d deleted.\n' % n)
 
         

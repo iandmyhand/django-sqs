@@ -1,5 +1,6 @@
 import logging
 import signal
+import sys
 import time
 from warnings import warn
 
@@ -159,7 +160,7 @@ class RegisteredQueue(object):
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
                 for connection in CONNECTIONS:
-                    print 'Closing', connection
+                    sys.stdout.write('Closing %s\n' % connection.__name__)
                     connection.close()
 
 
@@ -202,14 +203,16 @@ class RegisteredQueue(object):
                         if self.delete_on_start:
                             q.delete_message(m)
                         self.receive(m)
-                    except KeyboardInterrupt, e:
+                    except KeyboardInterrupt:
+                        e = sys.exc_info()[1]
                         raise e
                     except RestartLater:
                         self._log.debug("Restarting message handling")
                     except:
                         try:
                             body = repr(m.get_body())
-                        except Exception, e:
+                        except Exception:
+                            e = sys.exc_info()[1]
                             body = "(cannot run %r.get_body(): %s)" % (m, e)
                         self._log.exception(
                             "Caught exception in receive loop for %s %s" % (

@@ -1,4 +1,5 @@
 import base64
+import sys
 
 try:
     import json
@@ -29,7 +30,8 @@ class ModelInstanceMessage(boto.sqs.message.RawMessage):
     def decode(self, value):
         try:
             app_label, model, pk = json.loads(base64.b64decode(value))
-        except Exception, e:
+        except Exception:
+            e = sys.exc_info()[1]
             self.__reason = "Error decoding payload: %s" % e
             return None
             

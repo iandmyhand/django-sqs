@@ -2,6 +2,7 @@ import logging
 import os
 from optparse import make_option
 import signal
+import sys
 
 from django.core.management.base import BaseCommand
 
@@ -131,11 +132,12 @@ class Command(BaseCommand):
             else:
                 message_limit_info = ' %d messages' % message_limit
 
-            print 'Receiving%s from queue %s%s...' % (
+            sys.stdout.write('Receiving%s from queue %s%s...\n' % (
                 message_limit_info, queue_name,
                 ('.%s' % suffix if suffix else ''),
                 )
+            )
             rq.receive_loop(message_limit=message_limit,
                             suffix=suffix)
         else:
-            print 'Queue %s has no receiver, aborting.' % queue_name
+            sys.stdout.write('Queue %s has no receiver, aborting.\n' % queue_name)

@@ -1,5 +1,6 @@
 from optparse import make_option
 import time
+import sys
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
@@ -45,20 +46,20 @@ class Command(BaseCommand):
                 if c > 0:
                     empty = False
                     if verbosity > 1:
-                        print "Queue %s has %d messages, keep waiting." % (
-                            qname, c)
+                        sys.stdout.write("Queue %s has %d messages, keep waiting.\n" % (
+                            qname, c))
                     break
 
             if empty:
                 empty_cycles += 1
                 if empty_cycles > options['wait_cycles']:
                     if verbosity > 1:
-                        print '%d empty cycles, finishing.' % (empty_cycles - 1)
+                        sys.stdout.write('%d empty cycles, finishing.\n' % (empty_cycles - 1))
                     break
                 else:
                     if verbosity > 1:
-                        print '%d empty cycles, less than %d, still waiting.' % (
-                            empty_cycles - 1, options['wait_cycles'])
+                        sys.stdout.write('%d empty cycles, less than %d, still waiting.\n' % (
+                            empty_cycles - 1, options['wait_cycles']))
             else:
                 empty_cycles = 0
 
