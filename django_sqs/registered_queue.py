@@ -16,10 +16,6 @@ except ImportError:
     CONNECTIONS = (connection, )
 
 
-class _NullHandler(logging.Handler):
-    def emit(self, record):
-        pass
-
 DEFAULT_VISIBILITY_TIMEOUT = getattr(
     settings, 'SQS_DEFAULT_VISIBILITY_TIMEOUT', 60)
 
@@ -65,7 +61,7 @@ class RegisteredQueue(object):
     def __init__(self, name,
                  receiver=None, visibility_timeout=None,
                  timeout=None, delete_on_start=False, close_database=False,
-                 suffixes=()):
+                 suffixes=(), logger='django_sqs'):
         self._sqs_client = None
         self.name = name
         self.receiver = receiver
@@ -81,9 +77,8 @@ class RegisteredQueue(object):
 
         self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
 
-        self._log = logging.getLogger('django_sqs.queue.%s' % self.name)
-        self._log.addHandler(_NullHandler())
-        self._log.info("Using queue %s" % self.full_name())
+        self._logger = logging.getLogger(logger)
+        self._logger.info("Using queue %s" % self.full_name())
 
     def full_name(self, suffix=None):
         name = self.name
@@ -103,8 +98,7 @@ class RegisteredQueue(object):
                 settings.AWS_SECRET_ACCESS_KEY,
                 region_name=settings.AWS_REGION
             ).client(
-                'sqs',
-                config=boto3.session.Config(signature_version='s3v4')
+                'sqs'
             )
         return self._sqs_client
 
@@ -135,10 +129,11 @@ class RegisteredQueue(object):
             signal.alarm(self.timeout)
             signal.signal(signal.SIGALRM, sigalrm_handler)
         if settings.DEBUG:
-            self._log.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, attributes:%s, md5_of_body:%s"
-                            % (message_id, receipt_handle, body, str(attributes), md5_of_body))
+            self._logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
+                               "attributes:%s, md5_of_body:%s"
+                               % (message_id, receipt_handle, body, str(attributes), md5_of_body))
         else:
-            self._log.info("Message received. message_id:%s, body:%s" % (message_id, body))
+            self._logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
             self.receiver(body)
         finally:
@@ -154,7 +149,7 @@ class RegisteredQueue(object):
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
                 for _connection in CONNECTIONS:
-                    sys.stdout.write('Closing %s\n' % str(_connection))
+                    self._logger.info("Closing %s" % str(_connection))
                     _connection.close()
 
     def receive_single(self, suffix=None):
@@ -199,7 +194,7 @@ class RegisteredQueue(object):
             else:
                 try:
                     _message = _messages[0]
-                    sys.stdout.write('Received message: %s\n' % str(_message))
+                    self._logger.debug("Received message: %s" % str(_message))
                     _message_id = _message.get('MessageId')
                     _receipt_handle = _message.get('ReceiptHandle')
                     _body = _message.get('Body')
@@ -214,10 +209,10 @@ class RegisteredQueue(object):
                     e = sys.exc_info()[1]
                     raise e
                 except RestartLater:
-                    self._log.debug("Restarting message handling")
+                    self._logger.debug("Restarting message handling")
                 except Exception:
                     e = sys.exc_info()[1]
-                    self._log.exception(
+                    self._logger.exception(
                         "Caught exception in receive loop. Received message:%s, exception:%s" % (
                             str(_messages), str(e)))
 
@@ -227,6 +222,7 @@ class RegisteredQueue(object):
             MaxNumberOfMessages=number_messages,
             AttributeNames=['All'])
         _response_metadata = _response.get('ResponseMetadata')
-        self._log.debug('SQS Response Metadata: %s' % _response_metadata)
+        if 200 != _response_metadata.get('HTTPStatusCode'):
+            self._logger.error("SQS Response Metadata: %s" % _response_metadata)
         _messages = _response.get('Messages')
         return _messages
