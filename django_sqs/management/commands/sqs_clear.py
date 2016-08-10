@@ -21,5 +21,3 @@ class Command(BaseCommand):
             sys.stdout.flush()
             n = q.clear()
             sys.stdout.write('%d deleted.\n' % n)
-
-        

@@ -8,6 +8,7 @@ from django.core.management.base import BaseCommand
 
 import django_sqs
 
+
 # null handler to avoid warnings
 class _NullHandler(logging.Handler):
     def emit(self, record):
@@ -18,6 +19,8 @@ _signals = {}
 for name in dir(signal):
     if name.startswith('SIG'):
         _signals[getattr(signal, name)] = name
+
+
 def _status_string(status):
     "Pretty status description for exited child."
 
@@ -39,46 +42,52 @@ def _status_string(status):
 
     return "Unknown reason (%r)" % status
 
+
 class Command(BaseCommand):
     help = "Run Amazon SQS receiver for queues registered with django_sqs."
-    args = '[queue_name [queue_name [...]]]'
-    option_list = BaseCommand.option_list + (
-        make_option('--daemonize',
-                    action='store_true', dest='daemonize', default=False,
-                    help='Fork into background as a daemon.'),
-        make_option('--daemon-stdout-log',
-                    dest='stdout_log', default='/dev/null',
-                    help="Log daemon's standard output stream to a file"),
-        make_option('--daemon-stderr-log',
-                    dest='stderr_log', default='/dev/null',
-                    help="Log daemon's standard error stream to a file"),
-        make_option('--suffix', dest='suffix', default=None, metavar='SUFFIX',
-                    help="Append SUFFIX to queue name."),
-        make_option('--pid-file',
-                    dest='pid_file', default='',
-                    help="Store process ID in a file"),
-        make_option('--message-limit',
-                    dest='message_limit', default=None, type='int',
-                    metavar='N', help='Exit after processing N messages'),
-        )
+    args = '[queue_name:receiver_name [queue_name:receiver_name [...]]]'
 
-    def handle(self, *queue_names, **options):
+    def add_arguments(self, parser):
+        parser.add_argument('--daemonize',
+                            action='store_true', dest='daemonize', default=False,
+                            help='Fork into background as a daemon.')
+        parser.add_argument('--daemon-stdout-log',
+                            dest='stdout_log', default='/dev/null',
+                            help="Log daemon's standard output stream to a file")
+        parser.add_argument('--daemon-stderr-log',
+                            dest='stderr_log', default='/dev/null',
+                            help="Log daemon's standard error stream to a file")
+        parser.add_argument('--suffix',
+                            dest='suffix', default=None, metavar='SUFFIX',
+                            help="Append SUFFIX to queue name.")
+        parser.add_argument('--pid-file',
+                            dest='pid_file', default=None,
+                            help="Store process ID in a file")
+        parser.add_argument('--message-limit',
+                            dest='message_limit', default=None, type=int,
+                            help='Exit after processing N messages')
+
+    def handle(self, *queues, **options):
         self.validate()
 
-        if not queue_names:
-            queue_names = django_sqs.queues.keys()
+        _queues = list()
+        for _queue in queues:
+            _queue_name, _receiver = _queue.split(':')
+            sys.stdout.write('Initiating queue[%s] and receiver[%s]...\n' % (_queue_name, _receiver))
+            django_sqs.register(_queue_name, _receiver)
+            _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
 
         if options.get('daemonize', False):
             from django.utils.daemonize import become_daemon
             become_daemon(out_log=options.get('stdout_log', '/dev/null'),
                           err_log=options.get('stderr_log', '/dev/null'))
 
-        if options.get('pid_file', ''):
+        if options.get('pid_file'):
             with open(options['pid_file'], 'w') as f:
                 f.write('%d\n' % os.getpid())
 
-        if len(queue_names) == 1:
-            self.receive(queue_names[0],
+        if len(_queues) == 1:
+            self.receive(_queues[0]['queue_name'],
                          suffix=options.get('suffix'),
                          message_limit=options.get('message_limit', None))
         else:
@@ -95,17 +104,17 @@ class Command(BaseCommand):
 
             os.setpgrp()
             children = {}               # queue name -> pid
-            for queue_name in queue_names:
-                pid = self.fork_child(queue_name,
+            for _queue in _queues:
+                pid = self.fork_child(_queue['queue_name'],
                                       options.get('message_limit', None))
-                children[pid] = queue_name
-                _log.info("Forked %s for %s" % (pid, queue_name))
+                children[pid] = _queue['queue_name']
+                _log.info("Forked %s for %s" % (pid, _queue['queue_name']))
 
             while children:
                 pid, status = os.wait()
                 queue_name = children[pid]
                 _log.error("Child %d (%s) exited: %s" % (
-                    pid, children[pid], _status_string(status) ))
+                    pid, children[pid], _status_string(status)))
                 del children[pid]
 
                 pid = self.fork_child(queue_name)
@@ -114,7 +123,8 @@ class Command(BaseCommand):
 
     def fork_child(self, queue_name, message_limit=None):
         pid = os.fork()
-        if pid:                         # parent
+        if pid:
+            # parent
             return pid
         # child
         _log = logging.getLogger('django_sqs.runreceiver.%s' % queue_name)
@@ -125,19 +135,21 @@ class Command(BaseCommand):
         raise SystemExit(0)
 
     def receive(self, queue_name, message_limit=None, suffix=None):
-        rq = django_sqs.queues[queue_name]
-        if rq.receiver:
+        _log = logging.getLogger('django_sqs.runreceiver.%s' % queue_name)
+
+        _rq = django_sqs.queues[queue_name]
+        if _rq.receiver:
             if message_limit is None:
                 message_limit_info = ''
             else:
                 message_limit_info = ' %d messages' % message_limit
 
-            sys.stdout.write('Receiving%s from queue %s%s...\n' % (
+            _log.info('Receiving%s from queue %s%s...\n' % (
                 message_limit_info, queue_name,
                 ('.%s' % suffix if suffix else ''),
                 )
             )
-            rq.receive_loop(message_limit=message_limit,
-                            suffix=suffix)
+            _rq.receive_loop(message_limit=message_limit,
+                             suffix=suffix)
         else:
             sys.stdout.write('Queue %s has no receiver, aborting.\n' % queue_name)

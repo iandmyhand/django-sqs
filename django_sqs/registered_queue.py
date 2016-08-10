@@ -4,7 +4,7 @@ import sys
 import time
 from warnings import warn
 
-import boto.sqs.message
+import boto3
 
 from django.conf import settings
 
@@ -15,14 +15,10 @@ except ImportError:
     from django.db import connection
     CONNECTIONS = (connection, )
 
+
 class _NullHandler(logging.Handler):
     def emit(self, record):
         pass
-
-if settings.DEBUG:
-    boto_debug = 1
-else:
-    boto_debug=0
 
 DEFAULT_VISIBILITY_TIMEOUT = getattr(
     settings, 'SQS_DEFAULT_VISIBILITY_TIMEOUT', 60)
@@ -34,6 +30,7 @@ POLL_PERIOD = getattr(
 class TimedOut(Exception):
     """Raised by timeout handler."""
     pass
+
 
 def sigalrm_handler(signum, frame):
     raise TimedOut()
@@ -66,15 +63,14 @@ class RegisteredQueue(object):
             self.registered_queue.send(message, **kwargs)
 
     def __init__(self, name,
-                 receiver=None, visibility_timeout=None, message_class=None,
+                 receiver=None, visibility_timeout=None,
                  timeout=None, delete_on_start=False, close_database=False,
                  suffixes=()):
-        self._connection = None
+        self._sqs_client = None
         self.name = name
         self.receiver = receiver
         self.visibility_timeout = visibility_timeout or DEFAULT_VISIBILITY_TIMEOUT
-        self.message_class = message_class or boto.sqs.message.Message
-        self.queues = {}
+        self.queue_urls = {}
         self.timeout = timeout
         self.delete_on_start = delete_on_start
         self.close_database = close_database
@@ -82,11 +78,6 @@ class RegisteredQueue(object):
 
         if self.timeout and not self.receiver:
             raise ValueError("timeout is meaningful only with receiver")
-
-        if not issubclass(self.message_class, boto.sqs.message.RawMessage):
-            raise ValueError(
-                "%s is not a subclass of boto.sqs.message.RawMessage"
-                % self.message_class)
 
         self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
 
@@ -99,54 +90,57 @@ class RegisteredQueue(object):
         if suffix:
             if suffix not in self.suffixes:
                 warn("Unknown suffix %s" % suffix, UnknownSuffixWarning)
-            name = '%s__%s' % ( name, suffix )
+            name = '%s__%s' % (name, suffix)
         if self.prefix:
             return '%s__%s' % (self.prefix, name)
         else:
             return name
 
-    def get_connection(self):
-        if settings.AWS_REGION:
-            for r in boto.sqs.regions():
-                if r.name == settings.AWS_REGION:
-                    region = r
-
-        if self._connection is None:
-            self._connection = boto.sqs.connection.SQSConnection(
+    def get_sqs_client(self):
+        if self._sqs_client is None:
+            self._sqs_client = boto3.session.Session(
                 settings.AWS_ACCESS_KEY_ID,
                 settings.AWS_SECRET_ACCESS_KEY,
-                region=region,
-                debug=boto_debug)
-        return self._connection
+                region_name=settings.AWS_REGION
+            ).client(
+                'sqs',
+                config=boto3.session.Config(signature_version='s3v4')
+            )
+        return self._sqs_client
 
-    def get_queue(self, suffix=None):
-        if suffix not in self.queues:
-            self.queues[suffix] = self.get_connection().create_queue(
-                self.full_name(suffix), self.visibility_timeout)
-            self.queues[suffix].set_message_class(self.message_class)
-        return self.queues[suffix]
+    def get_queue_url(self, suffix=None):
+        if suffix not in self.queue_urls:
+            self.queue_urls[suffix] = self.get_sqs_client().create_queue(
+                QueueName=self.full_name(suffix),
+                Attributes={
+                    'VisibilityTimeout': str(self.visibility_timeout)
+                }
+            ).get('QueueUrl')
+        return self.queue_urls[suffix]
 
     def get_receiver_proxy(self):
         return self.ReceiverProxy(self)
 
     def send(self, message=None, suffix=None, **kwargs):
-        q = self.get_queue(suffix)
-        if message is None:
-            message = self.message_class(**kwargs)
-        else:
-            if not isinstance(message, self.message_class):
-                raise ValueError('%r is not an instance of %r' % (
-                    message, self.message_class))
-        q.write(message)
+        _queue_url = self.get_queue_url(suffix)
+        return self.get_sqs_client().send_message(
+            QueueUrl=_queue_url,
+            MessageBody=message
+        )
 
-    def receive(self, message):
+    def receive(self, message_id, receipt_handle, body, attributes, md5_of_body):
         if self.receiver is None:
             raise Exception("Not configured to received messages.")
         if self.timeout:
-           signal.alarm(self.timeout)
-           signal.signal(signal.SIGALRM, sigalrm_handler)
+            signal.alarm(self.timeout)
+            signal.signal(signal.SIGALRM, sigalrm_handler)
+        if settings.DEBUG:
+            self._log.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, attributes:%s, md5_of_body:%s"
+                            % (message_id, receipt_handle, body, str(attributes), md5_of_body))
+        else:
+            self._log.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
-            self.receiver(message)
+            self.receiver(body)
         finally:
             if self.timeout:
                 try:
@@ -159,10 +153,9 @@ class RegisteredQueue(object):
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
-                for connection in CONNECTIONS:
-                    sys.stdout.write('Closing %s\n' % connection.__name__)
-                    connection.close()
-
+                for _connection in CONNECTIONS:
+                    sys.stdout.write('Closing %s\n' % str(_connection))
+                    _connection.close()
 
     def receive_single(self, suffix=None):
         """Receive single message from the queue.
@@ -171,15 +164,20 @@ class RegisteredQueue(object):
         single message from the queue, processes it, deletes it from
         queue and returns (message, handler_result_value) pair.
         """
-        q = self.get_queue(suffix)
-        mm = q.get_messages(1)
-        if mm:
-            if self.delete_on_start:
-                q.delete_message(mm[0])
-            rv1 = self.receive(mm[0])
-            if not self.delete_on_start:
-                q.delete_message(mm[0])
-            return (mm[0], rv1)
+        _queue_url = self.get_queue_url(suffix)
+        _message = self._receive_messages(_queue_url)[:1]
+        _message_id = _message.get('MessageId')
+        _receipt_handle = _message.get('ReceiptHandle')
+        _body = _message.get('Body')
+        _attributes = _message.get('Attributes')
+        _md5_of_body = _message.get('MD5OfBody')
+
+        if self.delete_on_start:
+            self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+        self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
+        if not self.delete_on_start:
+            self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+        return
 
     def receive_loop(self, message_limit=None, suffix=None):
         """Run receiver loop.
@@ -187,38 +185,48 @@ class RegisteredQueue(object):
         If `message_limit' number is given, return after processing
         this number of messages.
         """
-        q = self.get_queue(suffix)
+        _queue_url = self.get_queue_url(suffix)
         i = 0
         while True:
             if message_limit:
                 i += 1
                 if i > message_limit:
                     return
-            mm = q.get_messages(1)
-            if not mm:
+
+            _messages = self._receive_messages(_queue_url)
+            if not _messages:
                 time.sleep(POLL_PERIOD)
             else:
-                for m in mm:
-                    try:
-                        if self.delete_on_start:
-                            q.delete_message(m)
-                        self.receive(m)
-                    except KeyboardInterrupt:
-                        e = sys.exc_info()[1]
-                        raise e
-                    except RestartLater:
-                        self._log.debug("Restarting message handling")
-                    except:
-                        try:
-                            body = repr(m.get_body())
-                        except Exception:
-                            e = sys.exc_info()[1]
-                            body = "(cannot run %r.get_body(): %s)" % (m, e)
-                        self._log.exception(
-                            "Caught exception in receive loop for %s %s" % (
-                                m.__class__, body))
-                        if not self.delete_on_start:
-                            q.delete_message(m)
-                    else:
-                        if not self.delete_on_start:
-                            q.delete_message(m)
+                try:
+                    _message = _messages[0]
+                    sys.stdout.write('Received message: %s\n' % str(_message))
+                    _message_id = _message.get('MessageId')
+                    _receipt_handle = _message.get('ReceiptHandle')
+                    _body = _message.get('Body')
+                    _attributes = _message.get('Attributes')
+                    _md5_of_body = _message.get('MD5OfBody')
+                    if self.delete_on_start:
+                        self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+                    self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
+                    if not self.delete_on_start:
+                        self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+                except KeyboardInterrupt:
+                    e = sys.exc_info()[1]
+                    raise e
+                except RestartLater:
+                    self._log.debug("Restarting message handling")
+                except Exception:
+                    e = sys.exc_info()[1]
+                    self._log.exception(
+                        "Caught exception in receive loop. Received message:%s, exception:%s" % (
+                            str(_messages), str(e)))
+
+    def _receive_messages(self, queue_url, number_messages=1):
+        _response = self.get_sqs_client().receive_message(
+            QueueUrl=queue_url,
+            MaxNumberOfMessages=number_messages,
+            AttributeNames=['All'])
+        _response_metadata = _response.get('ResponseMetadata')
+        self._log.debug('SQS Response Metadata: %s' % _response_metadata)
+        _messages = _response.get('Messages')
+        return _messages

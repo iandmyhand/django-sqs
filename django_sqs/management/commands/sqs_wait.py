@@ -10,6 +10,7 @@ import django_sqs
 WAIT_TIME = getattr(settings, 'SQS_WAIT_TIME', 60)
 WAIT_CYCLES = getattr(settings, 'SQS_WAIT_CYCLES', 1)
 
+
 class Command(BaseCommand):
     help = "Wait until queues registered with django_sqs are empty" \
            " and all messages are processed."
