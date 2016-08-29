@@ -135,6 +135,7 @@ class RegisteredQueue(object):
         else:
             self._logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
+            self._logger.debug(type(self.receiver))
             self.receiver(body)
         finally:
             if self.timeout:
@@ -202,7 +203,10 @@ class RegisteredQueue(object):
                     _md5_of_body = _message.get('MD5OfBody')
                     if self.delete_on_start:
                         self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+                    from django.db import connection
+                    connection.connect()
                     self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
+                    connection.close()
                     if not self.delete_on_start:
                         self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
                 except KeyboardInterrupt:

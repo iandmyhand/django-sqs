@@ -1,3 +1,5 @@
+from __future__ import absolute_import
+
 import logging
 import os
 import signal
@@ -39,7 +41,7 @@ def _status_string(status):
 
 class Command(BaseCommand):
     help = "Run Amazon SQS receiver for queues registered with django_sqs."
-    args = '[queue_name:receiver_name [queue_name:receiver_name [...]]]'
+    args = '[queue_name;package.module:receiver_name [queue_name;package.module:receiver_name [...]]]'
 
     def __init__(self, *args, **kwargs):
         super(Command, self).__init__(*args, **kwargs)
@@ -53,7 +55,7 @@ class Command(BaseCommand):
                             dest='suffix', default=None, metavar='SUFFIX',
                             help="Append SUFFIX to queue name.")
         parser.add_argument('--pid-file',
-                            dest='pid_file', type=str, default=None,
+                            dest='pid_file', type=str, default='sqs.pid',
                             help="Store process ID in a file")
         parser.add_argument('--message-limit',
                             dest='message_limit', type=int, default=None,
@@ -80,7 +82,7 @@ class Command(BaseCommand):
 
         _queues = list()
         for _queue in queues:
-            _queue_name, _receiver = _queue.split(':')
+            _queue_name, _receiver = _queue.split('=')
             self._logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
             django_sqs.register(_queue_name, _receiver)
             _queues.append({'queue_name': _queue_name, 'receiver': _receiver})

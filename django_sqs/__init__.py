@@ -1,4 +1,4 @@
-import sys
+import importlib
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -45,9 +45,14 @@ def _get_func(func):
     if hasattr(func, '__call__'):
         _func = func
     elif isinstance(func, str):
-        _modules = func.split('.')
-        _module = __import__('.'.join(_modules[:-1]), fromlist=(str(func),))
-        _func = getattr(_module, _modules[-1])
+        _module_string, _func_name = func.split(':')
+        print('import ' + settings.BASE_DIR + ':' + _module_string)
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
+        _module = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_module)
+        _func = getattr(_module, _func_name)
     else:
         raise TypeError('A type of "func" argument is must function or str. '
                         'When put str, it must be full name of function. '

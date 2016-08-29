@@ -15,6 +15,9 @@ setup(
     author_email='maciej@pasternacki.net',
     url='https://github.com/Fandekasp/django-sqs',
     packages=find_packages(),
+    install_requires=[
+        'python-daemon',
+    ]
     classifiers=[
         'Environment :: Web Environment',
         'Intended Audience :: Developers',
