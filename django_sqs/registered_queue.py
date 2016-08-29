@@ -1,12 +1,13 @@
+import django_sqs
 import logging
 import signal
 import sys
 import time
-from warnings import warn
-
 import boto3
 
+from warnings import warn
 from django.conf import settings
+from django.db import connection
 
 try:
     from django.db import connections
@@ -14,6 +15,8 @@ try:
 except ImportError:
     from django.db import connection
     CONNECTIONS = (connection, )
+
+logger = logging.getLogger(django_sqs.__name__)
 
 
 DEFAULT_VISIBILITY_TIMEOUT = getattr(
@@ -61,7 +64,12 @@ class RegisteredQueue(object):
     def __init__(self, name,
                  receiver=None, visibility_timeout=None,
                  timeout=None, delete_on_start=False, close_database=False,
-                 suffixes=(), logger='django_sqs'):
+                 suffixes=()):
+
+        self.kill_now = False
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
+
         self._sqs_client = None
         self.name = name
         self.receiver = receiver
@@ -73,12 +81,19 @@ class RegisteredQueue(object):
         self.suffixes = suffixes
 
         if self.timeout and not self.receiver:
-            raise ValueError("timeout is meaningful only with receiver")
+            raise ValueError("Timeout is meaningful only with receiver")
 
         self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
 
-        self._logger = logging.getLogger(logger)
-        self._logger.info("Using queue %s" % self.full_name())
+        logger.info("Using queue %s" % self.full_name())
+
+    def exit_gracefully(self, signum, frame):
+        _logger = logging.getLogger(django_sqs.__name__)
+        if signal.SIGTERM == signum:
+            _logger.info('Received termination signal. Prepare to exit...')
+            self.kill_now = True
+        else:
+            _logger.info('Received signal %d, but there is no process for this signal.' % signum)
 
     def full_name(self, suffix=None):
         name = self.name
@@ -129,14 +144,13 @@ class RegisteredQueue(object):
             signal.alarm(self.timeout)
             signal.signal(signal.SIGALRM, sigalrm_handler)
         if settings.DEBUG:
-            self._logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
-                               "attributes:%s, md5_of_body:%s"
-                               % (message_id, receipt_handle, body, str(attributes), md5_of_body))
+            logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
+                         "attributes:%s, md5_of_body:%s"
+                         % (message_id, receipt_handle, body, str(attributes), md5_of_body))
         else:
-            self._logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
+            logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
-            self._logger.debug(type(self.receiver))
-            self.receiver(body)
+            self._get_func(self.receiver)(body)
         finally:
             if self.timeout:
                 try:
@@ -150,8 +164,25 @@ class RegisteredQueue(object):
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
                 for _connection in CONNECTIONS:
-                    self._logger.info("Closing %s" % str(_connection))
+                    logger.info("Closing %s" % str(_connection))
                     _connection.close()
+
+    def _get_func(self, func):
+        if hasattr(func, '__call__'):
+            _func = func
+        elif isinstance(func, str):
+            _module_string, _func_name = func.split(':')
+            import importlib.util
+            _spec = importlib.util.spec_from_file_location(
+                _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
+            _module = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_module)
+            _func = getattr(_module, _func_name)
+        else:
+            raise TypeError('A type of "func" argument is must function or str. '
+                            'When put str, it must be full name of function. '
+                            'e.g.: func="moduleA.moduleB.function_name"')
+        return _func
 
     def receive_single(self, suffix=None):
         """Receive single message from the queue.
@@ -184,6 +215,9 @@ class RegisteredQueue(object):
         _queue_url = self.get_queue_url(suffix)
         i = 0
         while True:
+            if self.kill_now:
+                return
+
             if message_limit:
                 i += 1
                 if i > message_limit:
@@ -195,7 +229,7 @@ class RegisteredQueue(object):
             else:
                 try:
                     _message = _messages[0]
-                    self._logger.debug("Received message: %s" % str(_message))
+                    logger.debug("Received message: %s" % str(_message))
                     _message_id = _message.get('MessageId')
                     _receipt_handle = _message.get('ReceiptHandle')
                     _body = _message.get('Body')
@@ -203,7 +237,6 @@ class RegisteredQueue(object):
                     _md5_of_body = _message.get('MD5OfBody')
                     if self.delete_on_start:
                         self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
-                    from django.db import connection
                     connection.connect()
                     self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
                     connection.close()
@@ -213,10 +246,10 @@ class RegisteredQueue(object):
                     e = sys.exc_info()[1]
                     raise e
                 except RestartLater:
-                    self._logger.debug("Restarting message handling")
+                    logger.debug("Restarting message handling")
                 except Exception:
                     e = sys.exc_info()[1]
-                    self._logger.exception(
+                    logger.exception(
                         "Caught exception in receive loop. Received message:%s, exception:%s" % (
                             str(_messages), str(e)))
 
@@ -227,6 +260,6 @@ class RegisteredQueue(object):
             AttributeNames=['All'])
         _response_metadata = _response.get('ResponseMetadata')
         if 200 != _response_metadata.get('HTTPStatusCode'):
-            self._logger.error("SQS Response Metadata: %s" % _response_metadata)
+            logger.error("SQS Response Metadata: %s" % _response_metadata)
         _messages = _response.get('Messages')
         return _messages

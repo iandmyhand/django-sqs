@@ -1,13 +1,13 @@
-from __future__ import absolute_import
-
+import django_sqs
 import logging
 import os
 import signal
 
+from logging.handlers import WatchedFileHandler
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-import django_sqs
+logger = logging.getLogger(django_sqs.__name__)
 
 
 # signal name dict for logging
@@ -45,17 +45,16 @@ class Command(BaseCommand):
 
     def __init__(self, *args, **kwargs):
         super(Command, self).__init__(*args, **kwargs)
-        self._logger = logging.getLogger('django_sqs')
 
     def add_arguments(self, parser):
         parser.add_argument('--daemonize',
-                            dest='daemonize', type=str, default='/dev/null',
+                            dest='daemonize', type=str, default=None,
                             help='Fork into background as a daemon. Given value is used as log file.')
         parser.add_argument('--suffix',
                             dest='suffix', default=None, metavar='SUFFIX',
                             help="Append SUFFIX to queue name.")
         parser.add_argument('--pid-file',
-                            dest='pid_file', type=str, default='sqs.pid',
+                            dest='pid_file', type=str, default=None,
                             help="Store process ID in a file")
         parser.add_argument('--message-limit',
                             dest='message_limit', type=int, default=None,
@@ -65,27 +64,51 @@ class Command(BaseCommand):
         self.validate()
 
         _daemonize = options.get('daemonize')
+        if not _daemonize:
+            if hasattr(settings, 'DAEMONIZE') and settings.DAEMONIZE:
+                _daemonize = settings.DAEMONIZE
+
         if _daemonize:
             from django.utils.daemonize import become_daemon
-            become_daemon(out_log=_daemonize,
-                          err_log=_daemonize)
+            become_daemon()
 
-        if options.get('pid_file'):
-            with open(options['pid_file'], 'w') as f:
-                f.write('%d\n' % os.getpid())
+            _pid_file = options.get('pid_file')
+            if not _pid_file:
+                if hasattr(settings, 'PID_FILE') and settings.PID_FILE:
+                    _pid_file = settings.PID_FILE
+            if _pid_file:
+                with open(_pid_file, 'w') as f:
+                    f.write('%d\n' % os.getpid())
 
-        self._logger.setLevel(logging.DEBUG if settings.DEBUG else logging.INFO)
-        _formatter = logging.Formatter('[%(levelname)s %(asctime)s %(name)s] %(message)s')
-        _handler = logging.FileHandler(_daemonize)
-        _handler.setFormatter(_formatter)
-        self._logger.addHandler(_handler)
+        if not logger.handlers:
+            _formatter = logging.Formatter(
+                fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
+                    django_sqs.PROJECT_NAME + '] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S')
+            _handler = WatchedFileHandler(_daemonize)
+            _handler.setFormatter(_formatter)
+            logger.addHandler(_handler)
+            logger.setLevel(logging.DEBUG)
+            logger.info('Set new logger up.')
+        else:
+            logger.info('Use logger already set up.')
 
         _queues = list()
-        for _queue in queues:
-            _queue_name, _receiver = _queue.split('=')
-            self._logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
-            django_sqs.register(_queue_name, _receiver)
-            _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+        if queues:
+            for _queue in queues:
+                _queue_name, _receiver = _queue.split('=')
+                logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
+                django_sqs.register(_queue_name, _receiver)
+                _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+        elif hasattr(settings, 'QUEUES') and settings.QUEUES:
+            for _queue in settings.QUEUES:
+                _queue_name = _queue.get('queue_name')
+                _receiver = _queue.get('receiver')
+                logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
+                django_sqs.register(_queue_name, _receiver)
+                _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+        else:
+            raise Exception('There is no queues setting to initialize.')
 
         if len(_queues) == 1:
             self._receive(_queues[0]['queue_name'],
@@ -104,18 +127,19 @@ class Command(BaseCommand):
                 pid = self._fork_child(_queue['queue_name'],
                                        options.get('message_limit', None))
                 children[pid] = _queue['queue_name']
-                self._logger.info("Forked %s for %s" % (pid, _queue['queue_name']))
+                logger.info("Forked %s for %s" % (pid, _queue['queue_name']))
 
             while children:
                 pid, status = os.wait()
                 queue_name = children[pid]
-                self._logger.error("Child %d (%s) exited: %s" % (
+                logger.error("Child %d (%s) exited: %s" % (
                     pid, children[pid], _status_string(status)))
                 del children[pid]
 
                 pid = self._fork_child(queue_name)
                 children[pid] = queue_name
-                self._logger.info("Respawned %s for %s" % (pid, queue_name))
+                logger.info("Respawned %s for %s" % (pid, queue_name))
+        logger.info(django_sqs.PROJECT_NAME + ' is completely exited.')
 
     def _fork_child(self, queue_name, message_limit=None):
         pid = os.fork()
@@ -123,9 +147,9 @@ class Command(BaseCommand):
             # parent
             return pid
         # child
-        self._logger.info("Start receiving.")
+        logger.info("Start receiving.")
         self._receive(queue_name, message_limit=message_limit)
-        self._logger.error("CAN'T HAPPEN: exiting.")
+        logger.error("CAN'T HAPPEN: exiting.")
         raise SystemExit(0)
 
     def _receive(self, queue_name, message_limit=None, suffix=None):
@@ -136,7 +160,7 @@ class Command(BaseCommand):
             else:
                 message_limit_info = ' %d messages' % message_limit
 
-            self._logger.info('Receiving%s from queue %s%s...\n' % (
+            logger.info('Ready to receiving%s from queue %s%s...\n' % (
                 message_limit_info, queue_name,
                 ('.%s' % suffix if suffix else ''),
                 )
@@ -144,4 +168,4 @@ class Command(BaseCommand):
             _rq.receive_loop(message_limit=message_limit,
                              suffix=suffix)
         else:
-            self._logger.error('Queue %s has no receiver, aborting.' % queue_name)
+            logger.error('Queue %s has no receiver, aborting.' % queue_name)

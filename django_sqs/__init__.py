@@ -1,4 +1,4 @@
-import importlib
+import importlib.util
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -18,6 +18,8 @@ if not getattr(settings, 'AWS_SECRET_ACCESS_KEY'):
 # app_settings.py with default values
 if not getattr(settings, 'AWS_REGION'):
     settings.AWS_REGION = "us-east-1"
+
+PROJECT_NAME = 'Django SQS'
 
 
 # ============
@@ -46,8 +48,6 @@ def _get_func(func):
         _func = func
     elif isinstance(func, str):
         _module_string, _func_name = func.split(':')
-        print('import ' + settings.BASE_DIR + ':' + _module_string)
-        import importlib.util
         _spec = importlib.util.spec_from_file_location(
             _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
         _module = importlib.util.module_from_spec(_spec)
