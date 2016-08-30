@@ -3,9 +3,11 @@ import logging
 import os
 import signal
 
-from logging.handlers import WatchedFileHandler
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from django_sqs.registered_queue import RegisteredQueue
+from django_sqs.daemonize import CustomDaemonRunner
+from logging.handlers import WatchedFileHandler
 
 logger = logging.getLogger(django_sqs.__name__)
 
@@ -53,37 +55,28 @@ class Command(BaseCommand):
         parser.add_argument('--suffix',
                             dest='suffix', default=None, metavar='SUFFIX',
                             help="Append SUFFIX to queue name.")
-        parser.add_argument('--pid-file',
-                            dest='pid_file', type=str, default=None,
+        parser.add_argument('--pid-file-path',
+                            dest='pid_file_path', type=str, default=None,
                             help="Store process ID in a file")
         parser.add_argument('--message-limit',
                             dest='message_limit', type=int, default=None,
                             help='Exit after processing N messages')
 
-    def handle(self, *queues, **options):
+    def handle(self, *args, **options):
         self.validate()
 
         _daemonize = options.get('daemonize')
         if not _daemonize:
-            if hasattr(settings, 'DAEMONIZE') and settings.DAEMONIZE:
-                _daemonize = settings.DAEMONIZE
+            _daemonize = getattr(settings, 'DAEMONIZE')
 
-        if _daemonize:
-            from django.utils.daemonize import become_daemon
-            become_daemon()
-
-            _pid_file = options.get('pid_file')
-            if not _pid_file:
-                if hasattr(settings, 'PID_FILE') and settings.PID_FILE:
-                    _pid_file = settings.PID_FILE
-            if _pid_file:
-                with open(_pid_file, 'w') as f:
-                    f.write('%d\n' % os.getpid())
+        _pid_file_path = options.get('pid_file_path')
+        if not _pid_file_path:
+            _pid_file_path = getattr(settings, 'PID_FILE_PATH', 'sqs.pid')
 
         if not logger.handlers:
             _formatter = logging.Formatter(
                 fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
-                    django_sqs.PROJECT_NAME + '] %(message)s',
+                    django_sqs.PROJECT + '] %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S')
             _handler = WatchedFileHandler(_daemonize)
             _handler.setFormatter(_formatter)
@@ -94,52 +87,62 @@ class Command(BaseCommand):
             logger.info('Use logger already set up.')
 
         _queues = list()
-        if queues:
-            for _queue in queues:
-                _queue_name, _receiver = _queue.split('=')
-                logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
-                django_sqs.register(_queue_name, _receiver)
-                _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
-        elif hasattr(settings, 'QUEUES') and settings.QUEUES:
+        # if queues:
+        #     for _queue in queues:
+        #         _queue_name, _receiver = _queue.split('=')
+        #         logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
+        #         django_sqs.register(_queue_name, _receiver)
+        #         _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+        if hasattr(settings, 'QUEUES') and settings.QUEUES:
             for _queue in settings.QUEUES:
                 _queue_name = _queue.get('queue_name')
                 _receiver = _queue.get('receiver')
                 logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
-                django_sqs.register(_queue_name, _receiver)
-                _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+                _registered_queue = RegisteredQueue(_queue_name, django_sqs._get_func(_receiver),
+                                                    std_out_path=_daemonize,
+                                                    std_err_path=_daemonize,
+                                                    pid_file_path=_pid_file_path)
+                _runner = CustomDaemonRunner(_registered_queue, (__name__, args[0]))
+                for _handler in logger.handlers:
+                    logger.debug('handler: ' + str(_handler))
+                    logger.debug('handler: ' + str(_handler.__dict__))
+                # _runner.daemon_context.files_preserve = [logger.handlers[1].stream]
+                _runner.do_action()
+
+                # django_sqs.register(_queue_name, _receiver)
+                # _queues.append({'queue_name': _queue_name, 'receiver': _receiver})
         else:
-            raise Exception('There is no queues setting to initialize.')
+            raise Exception('There are no queues to initialize.')
 
-        if len(_queues) == 1:
-            self._receive(_queues[0]['queue_name'],
-                          suffix=options.get('suffix'),
-                          message_limit=options.get('message_limit', None))
-        else:
-            # Close the DB connection now and let Django reopen it when it
-            # is needed again.  The goal is to make sure that every
-            # process gets its own connection
-            from django.db import connection
-            connection.close()
-
-            os.setpgrp()
-            children = {}  # queue name -> pid
-            for _queue in _queues:
-                pid = self._fork_child(_queue['queue_name'],
-                                       options.get('message_limit', None))
-                children[pid] = _queue['queue_name']
-                logger.info("Forked %s for %s" % (pid, _queue['queue_name']))
-
-            while children:
-                pid, status = os.wait()
-                queue_name = children[pid]
-                logger.error("Child %d (%s) exited: %s" % (
-                    pid, children[pid], _status_string(status)))
-                del children[pid]
-
-                pid = self._fork_child(queue_name)
-                children[pid] = queue_name
-                logger.info("Respawned %s for %s" % (pid, queue_name))
-        logger.info(django_sqs.PROJECT_NAME + ' is completely exited.')
+        # if len(_queues) == 1:
+        #     self._receive(_queues[0]['queue_name'],
+        #                   suffix=options.get('suffix'),
+        #                   message_limit=options.get('message_limit', None))
+        # else:
+        #     # Close the DB connection now and let Django reopen it when it
+        #     # is needed again.  The goal is to make sure that every
+        #     # process gets its own connection
+        #     from django.db import connection
+        #     connection.close()
+        #
+        #     os.setpgrp()
+        #     children = {}  # queue name -> pid
+        #     for _queue in _queues:
+        #         pid = self._fork_child(_queue['queue_name'],
+        #                                options.get('message_limit', None))
+        #         children[pid] = _queue['queue_name']
+        #         logger.info("Forked %s for %s" % (pid, _queue['queue_name']))
+        #
+        #     while children:
+        #         pid, status = os.wait()
+        #         queue_name = children[pid]
+        #         logger.error("Child %d (%s) exited: %s" % (
+        #             pid, children[pid], _status_string(status)))
+        #         del children[pid]
+        #
+        #         pid = self._fork_child(queue_name)
+        #         children[pid] = queue_name
+        #         logger.info("Respawned %s for %s" % (pid, queue_name))
 
     def _fork_child(self, queue_name, message_limit=None):
         pid = os.fork()

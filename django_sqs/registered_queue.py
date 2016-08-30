@@ -1,13 +1,14 @@
+import boto3
 import django_sqs
 import logging
 import signal
 import sys
 import time
-import boto3
 
-from warnings import warn
 from django.conf import settings
 from django.db import connection
+from logging.handlers import WatchedFileHandler
+from warnings import warn
 
 try:
     from django.db import connections
@@ -15,8 +16,6 @@ try:
 except ImportError:
     from django.db import connection
     CONNECTIONS = (connection, )
-
-logger = logging.getLogger(django_sqs.__name__)
 
 
 DEFAULT_VISIBILITY_TIMEOUT = getattr(
@@ -64,11 +63,19 @@ class RegisteredQueue(object):
     def __init__(self, name,
                  receiver=None, visibility_timeout=None,
                  timeout=None, delete_on_start=False, close_database=False,
-                 suffixes=()):
+                 suffixes=(),
+                 std_in_path='/dev/null', std_out_path='sqs.log', std_err_path='sqs.log',
+                 pid_file_path='sqs.pid', pid_file_timeout=5):
+
+        self.logger = logging.getLogger(django_sqs.__name__)
 
         self.kill_now = False
-        signal.signal(signal.SIGINT, self.exit_gracefully)
-        signal.signal(signal.SIGTERM, self.exit_gracefully)
+
+        self.stdin_path = std_in_path
+        self.stdout_path = std_out_path
+        self.stderr_path = std_err_path
+        self.pidfile_path = pid_file_path
+        self.pidfile_timeout = pid_file_timeout
 
         self._sqs_client = None
         self.name = name
@@ -84,16 +91,6 @@ class RegisteredQueue(object):
             raise ValueError("Timeout is meaningful only with receiver")
 
         self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
-
-        logger.info("Using queue %s" % self.full_name())
-
-    def exit_gracefully(self, signum, frame):
-        _logger = logging.getLogger(django_sqs.__name__)
-        if signal.SIGTERM == signum:
-            _logger.info('Received termination signal. Prepare to exit...')
-            self.kill_now = True
-        else:
-            _logger.info('Received signal %d, but there is no process for this signal.' % signum)
 
     def full_name(self, suffix=None):
         name = self.name
@@ -144,11 +141,11 @@ class RegisteredQueue(object):
             signal.alarm(self.timeout)
             signal.signal(signal.SIGALRM, sigalrm_handler)
         if settings.DEBUG:
-            logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
+            self.logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
                          "attributes:%s, md5_of_body:%s"
                          % (message_id, receipt_handle, body, str(attributes), md5_of_body))
         else:
-            logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
+            self.logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
             self._get_func(self.receiver)(body)
         finally:
@@ -164,7 +161,7 @@ class RegisteredQueue(object):
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
                 for _connection in CONNECTIONS:
-                    logger.info("Closing %s" % str(_connection))
+                    self.logger.info("Closing %s" % str(_connection))
                     _connection.close()
 
     def _get_func(self, func):
@@ -229,7 +226,7 @@ class RegisteredQueue(object):
             else:
                 try:
                     _message = _messages[0]
-                    logger.debug("Received message: %s" % str(_message))
+                    self.logger.debug("Received message: %s" % str(_message))
                     _message_id = _message.get('MessageId')
                     _receipt_handle = _message.get('ReceiptHandle')
                     _body = _message.get('Body')
@@ -246,10 +243,10 @@ class RegisteredQueue(object):
                     e = sys.exc_info()[1]
                     raise e
                 except RestartLater:
-                    logger.debug("Restarting message handling")
+                    self.logger.debug("Restarting message handling")
                 except Exception:
                     e = sys.exc_info()[1]
-                    logger.exception(
+                    self.logger.exception(
                         "Caught exception in receive loop. Received message:%s, exception:%s" % (
                             str(_messages), str(e)))
 
@@ -260,6 +257,35 @@ class RegisteredQueue(object):
             AttributeNames=['All'])
         _response_metadata = _response.get('ResponseMetadata')
         if 200 != _response_metadata.get('HTTPStatusCode'):
-            logger.error("SQS Response Metadata: %s" % _response_metadata)
+            self.logger.error("SQS Response Metadata: %s" % _response_metadata)
         _messages = _response.get('Messages')
         return _messages
+
+    def exit_gracefully(self, signum, frame):
+        _logger = logging.getLogger(django_sqs.__name__)
+        if signal.SIGTERM == signum:
+            _logger.info('Received termination signal. Prepare to exit...')
+            self.kill_now = True
+        else:
+            _logger.info('Received signal %d, but there is no process for this signal.' % signum)
+
+    def run(self):
+
+        # Set up logger file handler in daemon process.
+        self.logger = logging.getLogger(django_sqs.__name__)
+        _formatter = logging.Formatter(
+            fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
+                django_sqs.PROJECT + '] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S')
+        _handler = WatchedFileHandler(self.stdout_path)
+        _handler.setFormatter(_formatter)
+        self.logger.addHandler(_handler)
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.info('Set new logger up.')
+
+        # Set signal handler up.
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
+
+        self.receive_loop()
+        self.logger.info(django_sqs.PROJECT + ' is completely exited.')
