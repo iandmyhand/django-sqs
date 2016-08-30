@@ -19,7 +19,7 @@ if not getattr(settings, 'AWS_SECRET_ACCESS_KEY'):
 if not getattr(settings, 'AWS_REGION'):
     settings.AWS_REGION = "us-east-1"
 
-PROJECT_NAME = 'Django SQS'
+PROJECT = 'Django SQS'
 
 
 # ============
