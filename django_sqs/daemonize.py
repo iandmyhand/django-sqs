@@ -18,17 +18,27 @@ class CustomDaemonRunner(DaemonRunner):
             None
 
         """
+        if not hasattr(app, 'stdin_path'):
+            raise Exception('App must has stdin_path.')
+        if not hasattr(app, 'stdout_path'):
+            raise Exception('App must has stdout_path.')
+        if not hasattr(app, 'stderr_path'):
+            raise Exception('App must has stderr_path.')
+        if not hasattr(app, 'pidfile_path'):
+            raise Exception('App must has pidfile_path.')
+        if not hasattr(app, 'pidfile_timeout'):
+            raise Exception('App must has pidfile_timeout.')
+
         # Parse args with passed from python's argument parser.
         self.parse_args(argv)
         self.app = app
         self.daemon_context = DaemonContext()
 
         # Use logger.
-        self.daemon_context.stdin = None
-        self.daemon_context.stdout = None
-        self.daemon_context.stderr = None
+        self.daemon_context.stdin = open(app.stdin_path, 'rt')
+        self.daemon_context.stdout = open(app.stdout_path, 'a+')
+        self.daemon_context.stderr = open(app.stderr_path, 'a+')
 
-        self.pidfile = None
         if app.pidfile_path is not None:
             self.pidfile = make_pidlockfile(app.pidfile_path, app.pidfile_timeout)
         self.daemon_context.pidfile = self.pidfile
