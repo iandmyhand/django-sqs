@@ -1,5 +1,3 @@
-import importlib.util
-
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
@@ -23,38 +21,9 @@ PROJECT = 'Django SQS'
 
 
 # ============
-# registry
-# ============
-queues = {}
-
-
-# ============
 # convenience
 # ============
-def register(queue_name, receiver, **kwargs):
-    _rq = RegisteredQueue(queue_name, _get_func(receiver), **kwargs)
-    queues[queue_name] = _rq
-    return _rq
-
-
 def send(queue_name, message, suffix=None, **kwargs):
     _rq = RegisteredQueue(queue_name, **kwargs)
     _rq.send(message, suffix, **kwargs)
     return _rq
-
-
-def _get_func(func):
-    if hasattr(func, '__call__'):
-        _func = func
-    elif isinstance(func, str):
-        _module_string, _func_name = func.split(':')
-        _spec = importlib.util.spec_from_file_location(
-            _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
-        _module = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_module)
-        _func = getattr(_module, _func_name)
-    else:
-        raise TypeError('A type of "func" argument is must function or str. '
-                        'When put str, it must be full name of function. '
-                        'e.g.: func="moduleA.moduleB.function_name"')
-    return _func
