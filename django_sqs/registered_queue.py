@@ -1,5 +1,7 @@
 import boto3
 import django_sqs
+import importlib.util
+import json
 import logging
 import signal
 import sys
@@ -44,6 +46,23 @@ class UnknownSuffixWarning(RuntimeWarning):
     pass
 
 
+def get_func(func):
+    if hasattr(func, '__call__'):
+        _func = func
+    elif isinstance(func, str):
+        _module_string, _func_name = func.split(':')
+        _spec = importlib.util.spec_from_file_location(
+            _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
+        _module = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_module)
+        _func = getattr(_module, _func_name)
+    else:
+        raise TypeError('A type of "func" argument is must function or str. '
+                        'When put str, it must be full name of function. '
+                        'e.g.: func="moduleA.moduleB.function_name"')
+    return _func
+
+
 class RegisteredQueue(object):
 
     class ReceiverProxy(object):
@@ -64,8 +83,9 @@ class RegisteredQueue(object):
                  receiver=None, visibility_timeout=None,
                  timeout=None, delete_on_start=False, close_database=False,
                  suffixes=(),
-                 std_in_path='/dev/null', std_out_path='sqs.log', std_err_path='sqs.log',
-                 pid_file_path='sqs.pid', pid_file_timeout=5):
+                 std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_error.log',
+                 pid_file_path='django_sqs.pid', pid_file_timeout=5,
+                 message_type='json'):
 
         self.logger = logging.getLogger(django_sqs.__name__)
 
@@ -86,11 +106,15 @@ class RegisteredQueue(object):
         self.delete_on_start = delete_on_start
         self.close_database = close_database
         self.suffixes = suffixes
+        self.message_type = message_type
 
         if self.timeout and not self.receiver:
             raise ValueError("Timeout is meaningful only with receiver")
 
         self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
+
+    def __str__(self):
+        return "%s[%s]" % (str(self.__class__), self.name)
 
     def full_name(self, suffix=None):
         name = self.name
@@ -129,9 +153,13 @@ class RegisteredQueue(object):
 
     def send(self, message=None, suffix=None, **kwargs):
         _queue_url = self.get_queue_url(suffix)
+        if 'json' == self.message_type:
+            _body = json.dumps(message)
+        else:
+            _body = str(message)
         return self.get_sqs_client().send_message(
             QueueUrl=_queue_url,
-            MessageBody=message
+            MessageBody=_body
         )
 
     def receive(self, message_id, receipt_handle, body, attributes, md5_of_body):
@@ -142,12 +170,16 @@ class RegisteredQueue(object):
             signal.signal(signal.SIGALRM, sigalrm_handler)
         if settings.DEBUG:
             self.logger.debug("Message received. message_id:%s, receipt_handle:%s, body:%s, "
-                         "attributes:%s, md5_of_body:%s"
-                         % (message_id, receipt_handle, body, str(attributes), md5_of_body))
+                              "attributes:%s, md5_of_body:%s"
+                              % (message_id, receipt_handle, body, str(attributes), md5_of_body))
         else:
             self.logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
-            self._get_func(self.receiver)(body)
+            if 'json' == self.message_type:
+                _body = json.loads(body)
+            else:
+                _body = str(body)
+            get_func(self.receiver)(_body)
         finally:
             if self.timeout:
                 try:
@@ -163,23 +195,6 @@ class RegisteredQueue(object):
                 for _connection in CONNECTIONS:
                     self.logger.info("Closing %s" % str(_connection))
                     _connection.close()
-
-    def _get_func(self, func):
-        if hasattr(func, '__call__'):
-            _func = func
-        elif isinstance(func, str):
-            _module_string, _func_name = func.split(':')
-            import importlib.util
-            _spec = importlib.util.spec_from_file_location(
-                _module_string, '%s/%s.py' % (settings.BASE_DIR, _module_string.replace('.', '/')))
-            _module = importlib.util.module_from_spec(_spec)
-            _spec.loader.exec_module(_module)
-            _func = getattr(_module, _func_name)
-        else:
-            raise TypeError('A type of "func" argument is must function or str. '
-                            'When put str, it must be full name of function. '
-                            'e.g.: func="moduleA.moduleB.function_name"')
-        return _func
 
     def receive_single(self, suffix=None):
         """Receive single message from the queue.
@@ -271,17 +286,26 @@ class RegisteredQueue(object):
 
     def run(self):
 
-        # Set up logger file handler in daemon process.
         self.logger = logging.getLogger(django_sqs.__name__)
-        _formatter = logging.Formatter(
-            fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
-                django_sqs.PROJECT + '] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S')
-        _handler = WatchedFileHandler(self.stdout_path)
-        _handler.setFormatter(_formatter)
-        self.logger.addHandler(_handler)
-        self.logger.setLevel(logging.DEBUG)
-        self.logger.info('Set new logger up.')
+        for _h in self.logger.handlers:
+            self.logger.debug('before:' + str(_h))
+            print('before print:' + str(_h))
+
+        if not self.logger.handlers:
+
+            # Set up logger file handler in daemon process.
+            _formatter = logging.Formatter(
+                fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
+                    django_sqs.PROJECT + '] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S')
+            _handler = WatchedFileHandler(self.stdout_path)
+            _handler.setFormatter(_formatter)
+            self.logger.addHandler(_handler)
+            self.logger.setLevel(logging.DEBUG)
+            self.logger.info('Set new logger up.')
+            for _h in self.logger.handlers:
+                self.logger.debug('after:' + str(_h))
+                print('after print:' + str(_h))
 
         # Set signal handler up.
         signal.signal(signal.SIGINT, self.exit_gracefully)
