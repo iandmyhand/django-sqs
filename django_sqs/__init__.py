@@ -23,7 +23,7 @@ PROJECT = 'Django SQS'
 # ============
 # convenience
 # ============
-def send(queue_name, message, suffix=None, **kwargs):
-    _rq = RegisteredQueue(queue_name, **kwargs)
-    _rq.send(message, suffix, **kwargs)
+def send(queue_name, receiver, message, suffix=None, **kwargs):
+    _rq = RegisteredQueue(queue_name, receiver, **kwargs)
+    _rq.send(message, suffix)
     return _rq

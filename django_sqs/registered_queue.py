@@ -3,6 +3,7 @@ import django_sqs
 import importlib.util
 import json
 import logging
+import random
 import signal
 import sys
 import time
@@ -24,7 +25,7 @@ DEFAULT_VISIBILITY_TIMEOUT = getattr(
     settings, 'SQS_DEFAULT_VISIBILITY_TIMEOUT', 60)
 
 POLL_PERIOD = getattr(
-    settings, 'SQS_POLL_PERIOD', 10)
+    settings, 'SQS_POLL_PERIOD', 5)
 
 
 class TimedOut(Exception):
@@ -80,8 +81,9 @@ class RegisteredQueue(object):
             self.registered_queue.send(message, **kwargs)
 
     def __init__(self, name,
-                 receiver=None, visibility_timeout=None,
-                 timeout=None, delete_on_start=False, close_database=False,
+                 receiver=None,
+                 visibility_timeout=None, timeout=None,
+                 delete_on_start=False, close_database=False,
                  suffixes=(),
                  std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_error.log',
                  pid_file_path='django_sqs.pid', pid_file_timeout=5,
@@ -111,21 +113,21 @@ class RegisteredQueue(object):
         if self.timeout and not self.receiver:
             raise ValueError("Timeout is meaningful only with receiver")
 
-        self.prefix = getattr(settings, 'SQS_QUEUE_PREFIX', None)
+        self.prefix = getattr(settings, 'DJANGO_SQS_QUEUE_PREFIX', None)
 
     def __str__(self):
-        return "%s[%s]" % (str(self.__class__), self.name)
+        return str(self.__class__)
 
     def full_name(self, suffix=None):
-        name = self.name
+        _name = self.name
         if suffix:
             if suffix not in self.suffixes:
                 warn("Unknown suffix %s" % suffix, UnknownSuffixWarning)
-            name = '%s__%s' % (name, suffix)
+            _name = '%s__%s' % (_name, suffix)
         if self.prefix:
-            return '%s__%s' % (self.prefix, name)
+            return '%s__%s' % (self.prefix, _name)
         else:
-            return name
+            return _name
 
     def get_sqs_client(self):
         if self._sqs_client is None:
@@ -151,20 +153,22 @@ class RegisteredQueue(object):
     def get_receiver_proxy(self):
         return self.ReceiverProxy(self)
 
-    def send(self, message=None, suffix=None, **kwargs):
+    def send(self, message=None, suffix=None):
         _queue_url = self.get_queue_url(suffix)
         if 'json' == self.message_type:
+            message['receiver'] = self.receiver
             _body = json.dumps(message)
         else:
-            _body = str(message)
+            _body = json.dumps({
+                'receiver': self.receiver,
+                'message': str(message)
+            })
         return self.get_sqs_client().send_message(
             QueueUrl=_queue_url,
             MessageBody=_body
         )
 
     def receive(self, message_id, receipt_handle, body, attributes, md5_of_body):
-        if self.receiver is None:
-            raise Exception("Not configured to received messages.")
         if self.timeout:
             signal.alarm(self.timeout)
             signal.signal(signal.SIGALRM, sigalrm_handler)
@@ -175,10 +179,12 @@ class RegisteredQueue(object):
         else:
             self.logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
-            if 'json' == self.message_type:
-                _body = json.loads(body)
-            else:
-                _body = str(body)
+            _body = json.loads(body)
+            self.receiver = _body.get('receiver')
+            if self.receiver is None:
+                raise Exception("Not configured for received messages.")
+            if 'json' != self.message_type:
+                _body = str(body.get('message'))
             get_func(self.receiver)(_body)
         finally:
             if self.timeout:
@@ -237,7 +243,7 @@ class RegisteredQueue(object):
 
             _messages = self._receive_messages(_queue_url)
             if not _messages:
-                time.sleep(POLL_PERIOD)
+                time.sleep(POLL_PERIOD + (random.randint(-10, 10) / 10))
             else:
                 try:
                     _message = _messages[0]

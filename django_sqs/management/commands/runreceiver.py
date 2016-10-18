@@ -57,25 +57,25 @@ class Command(BaseCommand):
                             help='[start|restart|stop]')
         parser.add_argument('-q', '--queues', nargs='+',
                             dest='queues', type=str,
-                            help="[queue_name;package.module:receiver_name "
-                                 "[queue_name;package.module:receiver_name [...]]]")
+                            help="[queue_name "
+                                 "[queue_name [...]]]")
         parser.add_argument('-d', '--daemonize',
                             dest='daemonize', type=bool, default=False,
                             help="Fork into background as a daemon. "
                                  "You can set this up at django\'s settings file: "
                                  "DJANGO_SQS_DAEMONIZE=[True|False].")
         parser.add_argument('-l', '--output-log-path',
-                            dest='output_log_path', type=str, default='django_sqs_output.log',
+                            dest='output_log_path', type=str, default=None,
                             help="Standard output log file. "
                                  "You can set this up at django\'s settings file: "
                                  "DJANGO_SQS_OUTPUT_LOG_PATH=[OUTPUT_LOG_FILE_PATH].")
         parser.add_argument('-e', '--error-log-path',
-                            dest='error_log_path', type=str, default='django_sqs_error.log',
+                            dest='error_log_path', type=str, default=None,
                             help="Standard error log file."
                                  "You can set this up at django\'s settings file: "
                                  "DJANGO_SQS_ERROR_LOG_PATH=[ERROR_LOG_FILE_PATH].")
         parser.add_argument('-p', '--pid-file-path',
-                            dest='pid_file_path', type=str, default='django_sqs.pid',
+                            dest='pid_file_path', type=str, default=None,
                             help="Store process ID in a file"
                                  "You can set this up at django\'s settings file: "
                                  "DJANGO_SQS_PID_FILE_PATH=[PID_FILE_PATH].")
@@ -83,7 +83,7 @@ class Command(BaseCommand):
                             dest='suffix', default=None, metavar='SUFFIX',
                             help="Append SUFFIX to queue name.")
         parser.add_argument('-t', '--message-type',
-                            dest='message_type', type=str, default='json',
+                            dest='message_type', type=str, default=None,
                             help="A Type of message. str and json are supported only.")
         parser.add_argument('-m', '--message-limit',
                             dest='message_limit', type=int, default=None,
@@ -93,30 +93,36 @@ class Command(BaseCommand):
         self.validate()
 
         _action = options['action']
+        if _action not in ('start', 'restart', 'stop'):
+            raise Exception('%s is not supported action.' % str(_action))
 
-        self._queues = getattr(settings, 'DJANGO_SQS_QUEUES', None)
-        if not self._queues and hasattr(options, 'queues'):
+        if options.get('queues'):
             for _queue in options.get('queues'):
-                _queue_name, _receiver = _queue.split('=')
-                self._queues.append({'queue_name': _queue_name, 'receiver': _receiver})
+                self._queues.append(_queue)
+        if not self._queues:
+            self._queues = getattr(settings, 'DJANGO_SQS_QUEUES', None)
         if not self._queues:
             raise Exception('There are no queues to initialize.')
 
-        _daemonize = getattr(settings, 'DJANGO_SQS_DAEMONIZE', None)
+        _daemonize = options.get('daemonize')
         if not _daemonize:
-            _daemonize = options.get('daemonize')
+            _daemonize = getattr(settings, 'DJANGO_SQS_DAEMONIZE', None)
 
-        _pid_file_path = getattr(settings, 'DJANGO_SQS_PID_FILE_PATH', None)
+        _pid_file_path = options.get('pid_file_path')
         if not _pid_file_path:
-            _pid_file_path = options.get('pid_file_path')
+            _pid_file_path = getattr(settings, 'DJANGO_SQS_PID_FILE_PATH', 'django_sqs.pid')
 
-        _output_log_path = getattr(settings, 'DJANGO_SQS_OUTPUT_LOG_PATH', None)
+        _output_log_path = options.get('output_log_path')
         if not _output_log_path:
-            _output_log_path = options.get('output_log_path')
+            _output_log_path = getattr(settings, 'DJANGO_SQS_OUTPUT_LOG_PATH', 'django_sqs_out.log')
 
-        _error_log_path = getattr(settings, 'DJANGO_SQS_ERROR_LOG_PATH', None)
-        if not _output_log_path:
-            _error_log_path = options.get('error_log_path')
+        _error_log_path = options.get('error_log_path')
+        if not _error_log_path:
+            _error_log_path = getattr(settings, 'DJANGO_SQS_ERROR_LOG_PATH', 'django_sqs_err.log')
+
+        _message_type = options.get('message_type')
+        if not _message_type:
+            _message_type = getattr(settings, 'DJANGO_SQS_MESSAGE_TYPE', 'json')
 
         # Set logger up.
         if not logger.handlers:
@@ -139,16 +145,20 @@ class Command(BaseCommand):
         connection.close()
 
         for _queue in self._queues:
-            _queue_name = _queue.get('queue_name')
-            _receiver = _queue.get('receiver')
-            logger.info('Initiating queue[%s] and receiver[%s]...' % (_queue_name, _receiver))
+            logger.info('Initiating queue[%s] with these options:' % str(_queue))
+            logger.info('   action: ' + str(_action))
+            logger.info('   daemonize: ' + str(_daemonize))
+            logger.info('   pid file path: ' + str(_pid_file_path))
+            logger.info('   output log path: ' + str(_output_log_path))
+            logger.info('   error log path: ' + str(_error_log_path))
+            logger.info('   message type: ' + str(_message_type))
 
-            _registered_queue = RegisteredQueue(_queue_name,
-                                                get_func(_receiver),
-                                                std_out_path=_output_log_path,
-                                                std_err_path=_error_log_path,
-                                                pid_file_path=_pid_file_path,
-                                                message_type=options.get('message_type'))
+            _registered_queue = RegisteredQueue(
+                _queue,
+                std_out_path=_output_log_path,
+                std_err_path=_error_log_path,
+                pid_file_path=_pid_file_path,
+                message_type=_message_type)
             if _daemonize:
                 logger.debug('Initiating daemon runner for %s...' % str(_registered_queue))
                 _runner = CustomDaemonRunner(_registered_queue, (__name__, _action))
