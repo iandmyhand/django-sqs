@@ -8,6 +8,8 @@ import signal
 import sys
 import time
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import as_completed
 from django.conf import settings
 from django.db import connection
 from logging.handlers import WatchedFileHandler
@@ -81,7 +83,6 @@ class RegisteredQueue(object):
             self.registered_queue.send(message, **kwargs)
 
     def __init__(self, name,
-                 receiver=None,
                  visibility_timeout=None, timeout=None,
                  delete_on_start=False, close_database=False,
                  suffixes=(),
@@ -101,7 +102,6 @@ class RegisteredQueue(object):
 
         self._sqs_client = None
         self.name = name
-        self.receiver = receiver
         self.visibility_timeout = visibility_timeout or DEFAULT_VISIBILITY_TIMEOUT
         self.queue_urls = {}
         self.timeout = timeout
@@ -109,8 +109,9 @@ class RegisteredQueue(object):
         self.close_database = close_database
         self.suffixes = suffixes
         self.message_type = message_type
+        self.futures = []
 
-        if self.timeout and not self.receiver:
+        if self.timeout:
             raise ValueError("Timeout is meaningful only with receiver")
 
         self.prefix = getattr(settings, 'DJANGO_SQS_QUEUE_PREFIX', None)
@@ -153,14 +154,14 @@ class RegisteredQueue(object):
     def get_receiver_proxy(self):
         return self.ReceiverProxy(self)
 
-    def send(self, message=None, suffix=None):
+    def send(self, receiver, message=None, suffix=None):
         _queue_url = self.get_queue_url(suffix)
         if 'json' == self.message_type:
-            message['receiver'] = self.receiver
+            message['receiver'] = receiver
             _body = json.dumps(message)
         else:
             _body = json.dumps({
-                'receiver': self.receiver,
+                'receiver': receiver,
                 'message': str(message)
             })
         return self.get_sqs_client().send_message(
@@ -168,7 +169,24 @@ class RegisteredQueue(object):
             MessageBody=_body
         )
 
-    def receive(self, message_id, receipt_handle, body, attributes, md5_of_body):
+    def handle_receiver(self, queue_url, receiver, message_id, receipt_handle, body, attributes, md5_of_body):
+        self.logger.debug("Receiver starts with message id %s(body: %s)" % (str(message_id), str(body)))
+        if self.delete_on_start:
+            self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+        connection.connect()
+        _result = False
+        try:
+            _receiver = get_func(receiver)
+            _result = _receiver(body)
+        except Exception as e:
+            self.logger.error(str(e))
+        connection.close()
+        if not self.delete_on_start:
+            self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+        self.logger.debug("Receiver ends with message id %s(body: %s)" % (str(message_id), str(body)))
+        return _result
+
+    def receive(self, queue_url, message_id, receipt_handle, body, attributes, md5_of_body):
         if self.timeout:
             signal.alarm(self.timeout)
             signal.signal(signal.SIGALRM, sigalrm_handler)
@@ -180,12 +198,26 @@ class RegisteredQueue(object):
             self.logger.info("Message received. message_id:%s, body:%s" % (message_id, body))
         try:
             _body = json.loads(body)
-            self.receiver = _body.get('receiver')
-            if self.receiver is None:
+            _receiver = _body.get('receiver')
+            if _receiver is None:
                 raise Exception("Not configured for received messages.")
             if 'json' != self.message_type:
                 _body = str(body.get('message'))
-            get_func(self.receiver)(_body)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                _params = {
+                    'queue_url': queue_url,
+                    'receiver': _receiver,
+                    'message_id': message_id,
+                    'receipt_handle': receipt_handle,
+                    'body': _body,
+                    'attributes': attributes,
+                    'md5_of_body': md5_of_body
+                }
+                try:
+                    _future = executor.submit(self.handle_receiver, **_params)
+                    self.futures.append(_future)
+                except Exception as e:
+                    self.logger.error("An error occurred during submitting receiver to thread pool executor: " + str(e))
         finally:
             if self.timeout:
                 try:
@@ -219,7 +251,7 @@ class RegisteredQueue(object):
 
         if self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
-        self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
+        self.receive(_queue_url, _message_id, _receipt_handle, _body, _attributes, _md5_of_body)
         if not self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
         return
@@ -241,6 +273,12 @@ class RegisteredQueue(object):
                 if i > message_limit:
                     return
 
+            # Max sub processes count is 5.
+            if 5 <= len(self.futures):
+                for f in as_completed(self.futures):
+                    self.logger.debug("Result of some future: " + str(f.result()))
+                self.futures = list()
+
             _messages = self._receive_messages(_queue_url)
             if not _messages:
                 time.sleep(POLL_PERIOD + (random.randint(-10, 10) / 10))
@@ -253,13 +291,9 @@ class RegisteredQueue(object):
                     _body = _message.get('Body')
                     _attributes = _message.get('Attributes')
                     _md5_of_body = _message.get('MD5OfBody')
-                    if self.delete_on_start:
-                        self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
-                    connection.connect()
-                    self.receive(_message_id, _receipt_handle, _body, _attributes, _md5_of_body)
-                    connection.close()
-                    if not self.delete_on_start:
-                        self.get_sqs_client().delete_message(QueueUrl=_queue_url, ReceiptHandle=_receipt_handle)
+
+                    self.receive(_queue_url, _message_id, _receipt_handle, _body, _attributes, _md5_of_body)
+
                 except KeyboardInterrupt:
                     e = sys.exc_info()[1]
                     raise e
@@ -286,6 +320,9 @@ class RegisteredQueue(object):
         _logger = logging.getLogger(django_sqs.__name__)
         if signal.SIGTERM == signum:
             _logger.info('Received termination signal. Prepare to exit...')
+            if 1 <= len(self.futures):
+                for f in as_completed(self.futures):
+                    self.logger.debug("Result of some future: " + str(f.result()))
             self.kill_now = True
         else:
             _logger.info('Received signal %d, but there is no process for this signal.' % signum)

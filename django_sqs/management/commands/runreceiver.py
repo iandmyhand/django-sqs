@@ -5,7 +5,6 @@ import signal
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django_sqs.registered_queue import get_func
 from django_sqs.registered_queue import RegisteredQueue
 from django_sqs.daemonize import CustomDaemonRunner
 from logging.handlers import WatchedFileHandler
@@ -163,8 +162,9 @@ class Command(BaseCommand):
                 logger.debug('Initiating daemon runner for %s...' % str(_registered_queue))
                 _runner = CustomDaemonRunner(_registered_queue, (__name__, _action))
                 logger.debug('Initiated daemon runner for %s...' % str(_registered_queue))
+                logger.info('%s daemon for %s...' % (str(_action), str(_registered_queue)))
                 _runner.do_action()
-                logger.debug('Run daemon for %s...' % str(_registered_queue))
             else:
                 logger.info('This is not a daemonized process. Use first queue.')
                 _registered_queue.receive_loop(options.get('message_limit'), options.get('suffix'))
+            logger.info('Exit process for %s' % str(_registered_queue))
