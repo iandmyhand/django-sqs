@@ -88,7 +88,8 @@ class RegisteredQueue(object):
                  suffixes=(),
                  std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_error.log',
                  pid_file_path='django_sqs.pid', pid_file_timeout=5,
-                 message_type='json'):
+                 message_type='json',
+                 exception_callback=None):
 
         self.logger = logging.getLogger(django_sqs.__name__)
 
@@ -109,6 +110,8 @@ class RegisteredQueue(object):
         self.close_database = close_database
         self.suffixes = suffixes
         self.message_type = message_type
+        self.exception_callback = get_func(exception_callback) if exception_callback else None
+
         self.futures = []
 
         if self.timeout:
@@ -180,6 +183,8 @@ class RegisteredQueue(object):
             _result = _receiver(body)
         except Exception as e:
             self.logger.error(str(e))
+            if self.exception_callback:
+                self.exception_callback(e)
         connection.close()
         if not self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)

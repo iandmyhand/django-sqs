@@ -1,7 +1,9 @@
 import django_sqs
+import errno
 import logging
 import os
 import signal
+import sys
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
@@ -39,6 +41,43 @@ def _status_string(status):
         return "Continued from stop"
 
     return "Unknown reason (%r)" % status
+
+
+def pid_exists(pid):
+    """
+    Check whether pid exists in the current process table.
+    UNIX only.
+
+    Args:
+        pid:
+
+    Returns:
+
+    """
+
+    if pid < 0:
+        return False
+    if pid == 0:
+        # According to "man 2 kill" PID 0 refers to every process
+        # in the process group of the calling process.
+        # On certain systems 0 is a valid PID but we have no way
+        # to know that in a portable fashion.
+        raise ValueError('invalid PID 0')
+    try:
+        os.kill(pid, 0)
+    except OSError as err:
+        if err.errno == errno.ESRCH:
+            # ESRCH == No such process
+            return False
+        elif err.errno == errno.EPERM:
+            # EPERM clearly means there's a process to deny access to
+            return True
+        else:
+            # According to "man 2 kill" possible error values are
+            # (EINVAL, EPERM, ESRCH)
+            raise
+    else:
+        return True
 
 
 class Command(BaseCommand):
@@ -123,6 +162,10 @@ class Command(BaseCommand):
         if not _message_type:
             _message_type = getattr(settings, 'DJANGO_SQS_MESSAGE_TYPE', 'json')
 
+        _exception_callback = options.get('exception_callback')
+        if not _exception_callback:
+            _exception_callback = getattr(settings, 'DJANGO_SQS_EXCEPTION_CALLBACK', None)
+
         # Set logger up.
         if not logger.handlers:
             _formatter = logging.Formatter(
@@ -151,13 +194,27 @@ class Command(BaseCommand):
             logger.info('   output log path: ' + str(_output_log_path))
             logger.info('   error log path: ' + str(_error_log_path))
             logger.info('   message type: ' + str(_message_type))
+            logger.info('   exception callback: ' + str(_exception_callback))
+
+            if 'start' == _action and os.path.isfile(_pid_file_path):
+                with open(_pid_file_path, 'r') as _pid_file:
+                    for _pid in _pid_file:
+                        try:
+                            _pid = int(_pid.rstrip('\n'))
+                        except (AttributeError, ValueError):
+                            _pid = -1
+                        logger.info('PID file exists already, so checking whether PID(%d) is running.' % _pid)
+                        if pid_exists(_pid):
+                            logger.info('PID(%d) is already running, so exit this process.' % _pid)
+                            return
 
             _registered_queue = RegisteredQueue(
                 _queue,
                 std_out_path=_output_log_path,
                 std_err_path=_error_log_path,
                 pid_file_path=_pid_file_path,
-                message_type=_message_type)
+                message_type=_message_type,
+                exception_callback=_exception_callback)
             if _daemonize:
                 logger.debug('Initiating daemon runner for %s...' % str(_registered_queue))
                 _runner = CustomDaemonRunner(_registered_queue, (__name__, _action))
