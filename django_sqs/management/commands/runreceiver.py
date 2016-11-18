@@ -152,11 +152,11 @@ class Command(BaseCommand):
 
         _output_log_path = options.get('output_log_path')
         if not _output_log_path:
-            _output_log_path = getattr(settings, 'DJANGO_SQS_OUTPUT_LOG_PATH', 'django_sqs_out.log')
+            _output_log_path = getattr(settings, 'DJANGO_SQS_OUTPUT_LOG_PATH', 'django_sqs_output.log')
 
         _error_log_path = options.get('error_log_path')
         if not _error_log_path:
-            _error_log_path = getattr(settings, 'DJANGO_SQS_ERROR_LOG_PATH', 'django_sqs_err.log')
+            _error_log_path = getattr(settings, 'DJANGO_SQS_ERROR_LOG_PATH', 'django_sqs_output.log')
 
         _message_type = options.get('message_type')
         if not _message_type:

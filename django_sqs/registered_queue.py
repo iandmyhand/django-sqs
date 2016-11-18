@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from django.conf import settings
@@ -55,6 +56,19 @@ def get_func(func):
     return _func
 
 
+class DjangoSQSFormatter(logging.Formatter):
+    converter = datetime.fromtimestamp
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            s = ct.strftime(datefmt)
+        else:
+            t = ct.strftime("%Y-%m-%d %H:%M:%S")
+            s = "%s,%06d" % (t, record.msecs)
+        return s
+
+
 class RegisteredQueue(object):
 
     class ReceiverProxy(object):
@@ -75,7 +89,7 @@ class RegisteredQueue(object):
                  visibility_timeout=None, timeout=None,
                  delete_on_start=False, close_database=True,
                  suffixes=(),
-                 std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_error.log',
+                 std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_output.log',
                  pid_file_path='django_sqs.pid', pid_file_timeout=5,
                  message_type='json',
                  exception_callback=None):
@@ -146,23 +160,28 @@ class RegisteredQueue(object):
     def get_receiver_proxy(self):
         return self.ReceiverProxy(self)
 
-    def send(self, receiver, message=None, suffix=None):
+    def send(self, receiver, params=None, suffix=None):
         _queue_url = self.get_queue_url(suffix)
         if 'json' == self.message_type:
-            message['receiver'] = receiver
-            _body = json.dumps(message)
+            _body = json.dumps({
+                'receiver': receiver,
+                'params': params
+            })
         else:
             _body = json.dumps({
                 'receiver': receiver,
-                'message': str(message)
+                'params': {
+                    'message': str(params)
+                }
             })
         return self.get_sqs_client().send_message(
             QueueUrl=_queue_url,
             MessageBody=_body
         )
 
-    def handle_receiver(self, queue_url, receiver, message_id, receipt_handle, body, attributes, md5_of_body):
-        self.logger.debug("Receiver starts with message id %s(body: %s)" % (str(message_id), str(body)))
+    def handle_receiver(self, queue_url, receiver, message_id, receipt_handle, params, attributes, md5_of_body):
+        self.logger.debug("Receiver starts with message id %s(receiver: %s, params: %s)"
+                          % (str(message_id), str(receiver), str(params)))
         from django.db import connections
         connections.close_all()
         if self.delete_on_start:
@@ -170,14 +189,15 @@ class RegisteredQueue(object):
         _result = False
         try:
             _receiver = get_func(receiver)
-            _result = _receiver(body)
+            _result = _receiver(**params)
         except Exception as e:
             self.logger.error(str(e))
             if self.exception_callback:
                 self.exception_callback(e)
         if not self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-        self.logger.debug("Receiver ends with message id %s(body: %s)" % (str(message_id), str(body)))
+        self.logger.debug("Receiver ends with message id %s(receiver: %s, params: %s)"
+                          % (str(message_id), str(receiver), str(params)))
         return _result
 
     def receive(self, queue_url, message_id, receipt_handle, body, attributes, md5_of_body):
@@ -195,15 +215,13 @@ class RegisteredQueue(object):
             _receiver = _body.get('receiver')
             if _receiver is None:
                 raise Exception("Not configured for received messages.")
-            if 'json' != self.message_type:
-                _body = str(body.get('message'))
             with ThreadPoolExecutor(max_workers=5) as executor:
                 _params = {
                     'queue_url': queue_url,
                     'receiver': _receiver,
                     'message_id': message_id,
                     'receipt_handle': receipt_handle,
-                    'body': _body,
+                    'params': _body.get('params'),
                     'attributes': attributes,
                     'md5_of_body': md5_of_body
                 }
@@ -233,6 +251,9 @@ class RegisteredQueue(object):
         This method is here for debugging purposes.  It receives
         single message from the queue, processes it, deletes it from
         queue and returns (message, handler_result_value) pair.
+
+        Args:
+            suffix:
         """
         _queue_url = self.get_queue_url(suffix)
         _message = self._receive_messages(_queue_url)[:1]
@@ -254,6 +275,9 @@ class RegisteredQueue(object):
 
         If `message_limit' number is given, return after processing
         this number of messages.
+        Args:
+            message_limit:
+            suffix:
         """
         _queue_url = self.get_queue_url(suffix)
         i = 0
@@ -328,14 +352,16 @@ class RegisteredQueue(object):
         self.logger.handlers = list()
 
         # Set up logger file handler in daemon process.
-        _formatter = logging.Formatter(
+        _formatter = DjangoSQSFormatter(
             fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
                 django_sqs.PROJECT + '] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S')
+            datefmt='%Y-%m-%d %H:%M:%S.%f'
+        )
         _handler = WatchedFileHandler(self.stdout_path)
         _handler.setFormatter(_formatter)
         self.logger.addHandler(_handler)
         self.logger.setLevel(logging.DEBUG)
+        self.logger.info('Django SQS starts!')
         self.logger.info('Set new logger up.')
         for _h in self.logger.handlers:
             self.logger.debug('Added logging handler: ' + str(_h))
