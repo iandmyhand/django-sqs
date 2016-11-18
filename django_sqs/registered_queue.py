@@ -8,19 +8,11 @@ import signal
 import sys
 import time
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from django.conf import settings
-from django.db import connection
 from logging.handlers import WatchedFileHandler
 from warnings import warn
-
-try:
-    from django.db import connections
-    CONNECTIONS = connections.all()
-except ImportError:
-    from django.db import connection
-    CONNECTIONS = (connection, )
 
 
 DEFAULT_VISIBILITY_TIMEOUT = getattr(
@@ -81,7 +73,7 @@ class RegisteredQueue(object):
 
     def __init__(self, name,
                  visibility_timeout=None, timeout=None,
-                 delete_on_start=False, close_database=False,
+                 delete_on_start=False, close_database=True,
                  suffixes=(),
                  std_in_path='/dev/null', std_out_path='django_sqs_output.log', std_err_path='django_sqs_error.log',
                  pid_file_path='django_sqs.pid', pid_file_timeout=5,
@@ -171,9 +163,10 @@ class RegisteredQueue(object):
 
     def handle_receiver(self, queue_url, receiver, message_id, receipt_handle, body, attributes, md5_of_body):
         self.logger.debug("Receiver starts with message id %s(body: %s)" % (str(message_id), str(body)))
+        from django.db import connections
+        connections.close_all()
         if self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-        connection.connect()
         _result = False
         try:
             _receiver = get_func(receiver)
@@ -182,7 +175,6 @@ class RegisteredQueue(object):
             self.logger.error(str(e))
             if self.exception_callback:
                 self.exception_callback(e)
-        connection.close()
         if not self.delete_on_start:
             self.get_sqs_client().delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
         self.logger.debug("Receiver ends with message id %s(body: %s)" % (str(message_id), str(body)))
@@ -232,9 +224,8 @@ class RegisteredQueue(object):
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if self.close_database:
-                for _connection in CONNECTIONS:
-                    self.logger.info("Closing %s" % str(_connection))
-                    _connection.close()
+                from django.db import connections
+                connections.close_all()
 
     def receive_single(self, suffix=None):
         """Receive single message from the queue.
@@ -306,6 +297,8 @@ class RegisteredQueue(object):
                     self.logger.exception(
                         "Caught exception in receive loop. Received message:%s, exception:%s" % (
                             str(_messages), str(e)))
+                    if self.exception_callback:
+                        self.exception_callback(e)
 
     def _receive_messages(self, queue_url, number_messages=1):
         _response = self.get_sqs_client().receive_message(
