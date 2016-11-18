@@ -325,25 +325,20 @@ class RegisteredQueue(object):
     def run(self):
 
         self.logger = logging.getLogger(django_sqs.__name__)
+        self.logger.handlers = list()
+
+        # Set up logger file handler in daemon process.
+        _formatter = logging.Formatter(
+            fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
+                django_sqs.PROJECT + '] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S')
+        _handler = WatchedFileHandler(self.stdout_path)
+        _handler.setFormatter(_formatter)
+        self.logger.addHandler(_handler)
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.info('Set new logger up.')
         for _h in self.logger.handlers:
-            self.logger.debug('before:' + str(_h))
-            print('before print:' + str(_h))
-
-        if not self.logger.handlers:
-
-            # Set up logger file handler in daemon process.
-            _formatter = logging.Formatter(
-                fmt='[%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d ' +
-                    django_sqs.PROJECT + '] %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S')
-            _handler = WatchedFileHandler(self.stdout_path)
-            _handler.setFormatter(_formatter)
-            self.logger.addHandler(_handler)
-            self.logger.setLevel(logging.DEBUG)
-            self.logger.info('Set new logger up.')
-            for _h in self.logger.handlers:
-                self.logger.debug('after:' + str(_h))
-                print('after print:' + str(_h))
+            self.logger.debug('Added logging handler: ' + str(_h))
 
         # Set signal handler up.
         signal.signal(signal.SIGINT, self.exit_gracefully)
