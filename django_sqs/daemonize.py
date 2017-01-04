@@ -35,9 +35,9 @@ class CustomDaemonRunner(DaemonRunner):
         self.daemon_context = DaemonContext()
 
         # Use logger.
-        self.daemon_context.stdin = open(app.stdin_path, 'rt')
-        self.daemon_context.stdout = open(app.stdout_path, 'a+')
-        self.daemon_context.stderr = open(app.stderr_path, 'a+')
+        self.daemon_context.stdin = open(app.stdin_path, 'rt', encoding='utf8')
+        self.daemon_context.stdout = open(app.stdout_path, 'a+', encoding='utf8')
+        self.daemon_context.stderr = open(app.stderr_path, 'a+', encoding='utf8')
 
         if app.pidfile_path is not None:
             self.pidfile = make_pidlockfile(app.pidfile_path, app.pidfile_timeout)

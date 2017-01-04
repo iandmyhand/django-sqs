@@ -348,7 +348,6 @@ class RegisteredQueue(object):
 
     def run(self):
 
-        self.logger = logging.getLogger(django_sqs.__name__)
         self.logger.handlers = list()
 
         # Set up logger file handler in daemon process.
@@ -357,7 +356,7 @@ class RegisteredQueue(object):
                 django_sqs.PROJECT + '] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S.%f'
         )
-        _handler = WatchedFileHandler(self.stdout_path)
+        _handler = WatchedFileHandler(self.stdout_path, encoding='utf8')
         _handler.setFormatter(_formatter)
         self.logger.addHandler(_handler)
         self.logger.setLevel(logging.DEBUG)
@@ -365,6 +364,15 @@ class RegisteredQueue(object):
         self.logger.info('Set new logger up.')
         for _h in self.logger.handlers:
             self.logger.debug('Added logging handler: ' + str(_h))
+
+        for _logger_name in settings.LOGGING.get('loggers'):
+            _logger = logging.getLogger(_logger_name)
+            _logger_setting = settings.LOGGING.get('loggers').get(_logger_name)
+            if 'file' in _logger_setting.get('handlers'):
+                _logger.handlers = list()
+                _logger.addHandler(_handler)
+                _logger.setLevel(logging._nameToLevel.get(_logger_setting.get('level', 'DEBUG')))
+                self.logger.info('Re-setup for logger [%s] in Django settings.' % _logger_name)
 
         # Set signal handler up.
         signal.signal(signal.SIGINT, self.exit_gracefully)
