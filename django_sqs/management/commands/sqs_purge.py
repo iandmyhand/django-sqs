@@ -1,15 +1,7 @@
 import django_sqs
-import errno
 import logging
-import os
-import signal
-import subprocess
 
-from django.conf import settings
 from django.core.management.base import BaseCommand
-from django_sqs.registered_queue import RegisteredQueue
-from django_sqs.daemonize import CustomDaemonRunner
-from logging.handlers import WatchedFileHandler
 
 logger = logging.getLogger(django_sqs.__name__)
 
@@ -28,6 +20,9 @@ class Command(BaseCommand):
         parser.add_argument('-rh', '--receipt-handle',
                             dest='receipt_handle', type=str, default=None,
                             help="Put a SQS's ReceiptHandle value to remove from the Queue.")
+        parser.add_argument('-a', '--all',
+                            dest='all', type=bool, default=False,
+                            help="Whether purge all messages or not.")
 
     def handle(self, *args, **options):
         self.validate()
@@ -38,7 +33,10 @@ class Command(BaseCommand):
 
         _receipt_handle = options.get('receipt_handle')
         if not _receipt_handle:
-            raise Exception("Please put a ReceiptHandle value with --receipt-handle option.")
-
-        django_sqs.purge(_queue_alias, _receipt_handle)
+            if options.get('all'):
+                django_sqs.purge_all(_queue_alias)
+            else:
+                raise Exception("Please put a ReceiptHandle value with --receipt-handle option.")
+        else:
+            django_sqs.purge(_queue_alias, _receipt_handle)
         logger.warning("A message in {} deleted with receipt handle[{}].".format(_queue_alias, _receipt_handle))

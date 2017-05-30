@@ -240,9 +240,32 @@ class RegisteredQueue(object):
             MessageBody=_body
         )
 
-    def delete_message(self, receipt_handle, queue_url=None, suffix=None):
+    def purge_all(self, queue_url=None, suffix=None):
         if not queue_url:
             queue_url = self.get_queue_url(suffix)
+        if not queue_url:
+            self.logger.error("Wrong queue_url.")
+            return False
+        self.logger.warning("Delete 10 messages...")
+        _messages = self._receive_messages(queue_url, 10)
+        if not _messages:
+            self.logger.warning("Messages are empty. Stop this process.")
+            return True
+        for _message in _messages:
+            _receipt_handle = _message.get('ReceiptHandle')
+            if not _receipt_handle:
+                self.logger.warning("Empty receipt handle.")
+                continue
+            self.delete_message(_receipt_handle, queue_url)
+        return True
+
+    def delete_message(self, receipt_handle, queue_url=None, suffix=None):
+        if not receipt_handle:
+            self.logger.error("Empty receipt handle:{}".format(receipt_handle))
+            return False
+        if not queue_url:
+            queue_url = self.get_queue_url(suffix)
+        self.logger.warning("Delete receipt handle({}) from queue({}). ".format(receipt_handle, queue_url))
         self.sqs_client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
         return True
 
@@ -251,9 +274,14 @@ class RegisteredQueue(object):
                               message_id, receiver, params))
         from django.db import connections
         connections.close_all()
-        if self.options['delete_on_start']:
-            self.logger.debug("Delete message on start for message id {}"
-                              "(receiver:{}, params:{}, receipt_handle:{})".format(
+
+        try:
+            _delete_on_start = params.pop('delete_on_start')
+        except KeyError:
+            _delete_on_start = self.options['delete_on_start']
+        if _delete_on_start:
+            self.logger.info("Delete message on start for message id {}"
+                             "(receiver:{}, params:{}, receipt_handle:{})".format(
                                   message_id, receiver, params, receipt_handle))
             self.delete_message(receipt_handle, queue_url)
         _result = False
@@ -264,13 +292,13 @@ class RegisteredQueue(object):
             self.logger.error(str(e))
             if self.exception_callback:
                 self.exception_callback(e)
-        if not self.options['delete_on_start'] and _result is True:
-            self.logger.debug("Delete message on end for message id {}"
-                              "(receiver:{}, params:{}, receipt_handle:{})".format(
+        if not _delete_on_start and _result is True:
+            self.logger.info("Delete message on end for message id {}"
+                             "(receiver:{}, params:{}, receipt_handle:{})".format(
                                   message_id, receiver, params, receipt_handle))
             self.delete_message(receipt_handle, queue_url)
-        self.logger.debug("Receiver ends with message id {}"
-                          "(receiver:{}, params:{}, receipt_handle:{})".format(
+        self.logger.info("Receiver ends with message id {}"
+                         "(receiver:{}, params:{}, receipt_handle:{})".format(
                               message_id, receiver, params, receipt_handle))
         return _result
 
